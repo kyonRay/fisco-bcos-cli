@@ -31,6 +31,32 @@ describe("toSerializable", () => {
     expect(toSerializable(new Uint8Array([0xde, 0xad, 0xbe, 0xef])))
       .toBe("0xdeadbeef");
   });
+
+  it("converts Date to ISO string", () => {
+    const d = new Date("2025-01-02T03:04:05.678Z");
+    expect(toSerializable(d)).toBe("2025-01-02T03:04:05.678Z");
+  });
+
+  it("does not false-positive on DAG (shared non-circular refs)", () => {
+    const shared = { x: 1 };
+    const out = toSerializable({ a: shared, b: shared }) as {
+      a: { x: number }; b: { x: number };
+    };
+    expect(out.a).toEqual({ x: 1 });
+    expect(out.b).toEqual({ x: 1 });
+  });
+
+  it("still detects actual cycles", () => {
+    const a: Record<string, unknown> = {};
+    a.self = a;
+    const out = toSerializable(a) as Record<string, unknown>;
+    expect(out.self).toBe("[Circular]");
+  });
+
+  it("handles negative and zero bigint", () => {
+    expect(toSerializable(-1n)).toBe("-1");
+    expect(toSerializable(0n)).toBe("0");
+  });
 });
 
 describe("stringify", () => {

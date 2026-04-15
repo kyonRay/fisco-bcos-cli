@@ -22,13 +22,13 @@ export async function loadConfigFile(path: string): Promise<ConfigFile | null> {
   try {
     parsed = yaml.load(raw);
   } catch (err) {
-    throw new BcosCliError("INVALID_CONFIG", `INVALID_CONFIG: YAML parse error in ${path}`, {}, err);
+    throw new BcosCliError("INVALID_CONFIG", `YAML parse error in ${path}`, {}, err);
   }
   const result = ConfigFileSchema.safeParse(parsed);
   if (!result.success) {
-    throw new BcosCliError("INVALID_CONFIG", `INVALID_CONFIG: config schema error in ${path}`, {
+    throw new BcosCliError("INVALID_CONFIG", `config schema error in ${path}`, {
       issues: result.error.issues,
-    });
+    }, result.error);
   }
   return result.data;
 }

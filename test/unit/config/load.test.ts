@@ -3,6 +3,7 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfigFile, expandHome } from "../../../src/config/load.js";
+import { BcosCliError } from "../../../src/errors.js";
 
 function tmp(content: string): string {
   const dir = mkdtempSync(join(tmpdir(), "bcos-cfg-"));
@@ -44,7 +45,9 @@ chains:
   it("throws INVALID_CONFIG on malformed YAML", async () => {
     const file = tmp("not: [valid");
     try {
-      await expect(loadConfigFile(file)).rejects.toThrow(/INVALID_CONFIG/);
+      await expect(loadConfigFile(file)).rejects.toSatisfy(
+        (err: unknown) => err instanceof BcosCliError && err.code === "INVALID_CONFIG",
+      );
     } finally {
       rmSync(file, { force: true });
     }
@@ -57,7 +60,9 @@ chains:
   local: {}
 `);
     try {
-      await expect(loadConfigFile(file)).rejects.toThrow(/INVALID_CONFIG/);
+      await expect(loadConfigFile(file)).rejects.toSatisfy(
+        (err: unknown) => err instanceof BcosCliError && err.code === "INVALID_CONFIG",
+      );
     } finally {
       rmSync(file, { force: true });
     }

@@ -11,6 +11,12 @@ describe("BcosCliError", () => {
     expect(e.cause).toBe(cause);
     expect(e.name).toBe("BcosCliError");
   });
+
+  it("exposes cause via the native Error.cause slot", () => {
+    const inner = new Error("inner");
+    const e = new BcosCliError("RPC_ERROR", "outer", {}, inner);
+    expect(e.cause).toBe(inner);
+  });
 });
 
 describe("exitCodeFor", () => {

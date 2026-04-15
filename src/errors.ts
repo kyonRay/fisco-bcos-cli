@@ -31,9 +31,9 @@ export class BcosCliError extends Error {
     readonly code: ErrorCode,
     message: string,
     readonly details?: Record<string, unknown>,
-    readonly cause?: unknown,
+    cause?: unknown,
   ) {
-    super(message);
+    super(message, cause !== undefined ? { cause } : undefined);
   }
 }
 

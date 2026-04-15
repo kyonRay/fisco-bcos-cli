@@ -4963,3 +4963,105 @@ No issues found.
 - **Phase 6:** 8 tasks (fixtures, E2E, docs, CI)
 
 **≈ 40 tasks**, each either atomic or a small cluster around one surface. Estimated runtime: one focused day per phase, ~5 days end-to-end for a subagent-driven run.
+
+---
+
+## Execution Strategy (subagent-driven, hybrid serial/parallel)
+
+Controller (main session) dispatches subagents via the `Agent` tool with `isolation: "worktree"` when parallelizing. Each task follows the `superpowers:subagent-driven-development` three-stage protocol: **implementer → spec compliance reviewer → code quality reviewer**. No stage is skipped.
+
+### Phase-by-phase execution mode
+
+| Phase | Mode | Rationale |
+|---|---|---|
+| Phase 1 (5 tasks) | **Serial**, single worktree-less main repo | Strong sequential deps (scaffold gates all others; types→errors→serialize→validators import chain). Tasks are small enough that worktree setup cost exceeds parallel gain. |
+| Phase 2 (5 tasks) | **Serial**, main repo | Chain dependency: config/schema → load → resolve → registry → context. |
+| Phase 3 (7 service tasks) | **Parallel batch**: 7 worktrees fired simultaneously | Services are independent; each produces one file pair (service + test). High parallel ROI. |
+| Phase 4 (11 handler clusters + registerAll) | **Parallel in 2 batches** after Phase 3 merged. Batch A: Tasks 4.0 + 4.1–4.5 (7 worktrees). Batch B: Tasks 4.6–4.9 (4 worktrees). Task 4.10 serial after Batch B. | Handlers are mutually independent once services exist. 4.10 must run last because it imports every handler. |
+| Phase 5 (4 tasks) | **Serial**, main repo | zodToYargs and prettyRender can be parallel but CLI entry (5.3) imports both; MCP server (5.4) imports all handlers via registerAll. Small task count; serial clearer. |
+| Phase 6 (8 tasks) | **Mixed**: Tasks 6.1, 6.4, 6.5 parallel (fixtures/examples); 6.2, 6.3 serial after build; 6.6–6.8 serial at end | Fixture creation is read-only to codebase; E2E tests need a stable build. |
+
+### Branch naming
+
+- Phase 3: `feat/phase3-<service>` (e.g., `feat/phase3-bcosRpc`, `feat/phase3-logParser`)
+- Phase 4 Batch A: `feat/phase4a-<cluster>` (e.g., `feat/phase4a-tx`, `feat/phase4a-chain`, `feat/phase4a-abi`, `feat/phase4a-event-search`, `feat/phase4a-basic-reads`, `feat/phase4a-buildContext`)
+- Phase 4 Batch B: `feat/phase4b-<cluster>` (e.g., `feat/phase4b-doctor-rpc`, `feat/phase4b-doctor-log`, `feat/phase4b-eth`, `feat/phase4b-config`)
+- Phase 6 parallel: `feat/phase6-<topic>` (e.g., `feat/phase6-fixtureServer`, `feat/phase6-logFixtures`, `feat/phase6-examples`)
+- Serial phases commit directly to `master`.
+
+### Merge policy (controller-owned)
+
+1. **Controller performs all merges in the main session.** Subagents never merge their own work.
+2. After a parallel batch completes, controller:
+   - Lists each worktree's final commit SHA.
+   - Runs `git merge --no-ff <branch>` for each branch in turn into `master`.
+   - **Conflict resolution is the controller's responsibility**, not the originating subagent's. Controller reads both sides, resolves, and commits the merge.
+   - After all merges, controller runs `pnpm tsc --noEmit && pnpm vitest run` on the merged tree. If anything breaks, controller either fixes inline (if trivial) or dispatches a focused fix-subagent with the exact failure.
+3. Worktrees are removed via `ExitWorktree` after successful merge.
+4. No PRs; direct merges to `master` (this is greenfield solo work).
+
+### Review discipline (per task, non-negotiable)
+
+For **every** task, three subagents in order:
+
+1. **Implementer** — receives the full task text from the plan plus scene-setting context (which phase, what's been merged already, which services/types it can depend on). Implements TDD-style, commits, self-reviews. Reports DONE / DONE_WITH_CONCERNS / NEEDS_CONTEXT / BLOCKED.
+2. **Spec compliance reviewer** — confirms the diff matches the task's spec in the plan (no missing requirements, no unrequested additions). On `❌`, implementer fixes, spec reviewer re-reviews. Loop until ✅.
+3. **Code quality reviewer** — only dispatched after spec review ✅. Reviews for correctness, readability, duplication, edge cases. Same fix-loop as spec review.
+
+Skipping either review stage is a red flag per the skill. The cost (3 subagents per task × 40 tasks ≈ 120 subagent calls) is accepted.
+
+### Model selection per role
+
+| Role | Model | Reasoning |
+|---|---|---|
+| Scaffolding, pure utilities, types, simple handlers (Phase 1 1.2/1.5, Phase 4 eth/config handlers) | haiku | Mechanical, well-specified |
+| Services, registry, commands with integration concerns (most of Phase 3 & 4) | sonnet | Integration judgment, multi-file awareness |
+| Shells (Phase 5), MCP server, CLI dispatcher, final full-repo reviewer | opus | Architecture touch-points, highest stakes |
+| Spec compliance reviewer | haiku | Mechanical diff-vs-spec check |
+| Code quality reviewer | sonnet | Requires judgment about duplication, idioms, edge cases |
+| Final cross-phase reviewer (after Phase 6.8) | opus | Whole-codebase review |
+
+### Controller checkpoints (stops for user review)
+
+Controller pauses and reports to user at these points:
+
+1. **After Phase 1 merged and all tests green** → user confirms to start Phase 2.
+2. **After Phase 2 merged** → user confirms to fire Phase 3 parallel batch.
+3. **After Phase 3 parallel batch merged** → user confirms to fire Phase 4 Batch A.
+4. **After Phase 4 Batch A merged** → user confirms to fire Phase 4 Batch B + 4.10.
+5. **After Phase 4 complete (merged + test green)** → user confirms Phase 5.
+6. **After Phase 5 complete** → user confirms Phase 6.
+7. **After Phase 6 complete** → controller dispatches final whole-repo reviewer (opus), presents report, user decides on release.
+
+At each checkpoint, controller reports: merged branches, test pass count, coverage %, any open DONE_WITH_CONCERNS notes.
+
+### Dispatch prompt contract (what every subagent gets)
+
+Every subagent prompt contains:
+
+1. **Role declaration** (implementer vs spec reviewer vs code quality reviewer).
+2. **Full task text copy-pasted from this plan** — the subagent never reads the plan file itself, avoiding accidental scope-creep into neighboring tasks.
+3. **Scene-setting context**: which phase, what's already merged to `master`, what types/functions exist to depend on, what's NOT yet available.
+4. **Worktree instructions** (if parallel): branch name, create a new worktree from `master`, commit there, do not push.
+5. **Exit criteria**: what files, what tests pass, what commit message.
+6. **Reporting format**: DONE / DONE_WITH_CONCERNS / NEEDS_CONTEXT / BLOCKED + final commit SHA + test output tail.
+
+The controller does NOT ask the subagent to read any file it hasn't been handed explicitly. This keeps subagent context focused and predictable.
+
+### Failure handling
+
+- **BLOCKED on missing context**: controller provides context and re-dispatches same subagent role with more info.
+- **BLOCKED on reasoning complexity**: controller escalates to a more capable model on re-dispatch (sonnet → opus).
+- **BLOCKED on plan error**: controller pauses, asks user to amend the plan.
+- **Reviewer loop > 3 iterations** on the same task: controller intervenes, reads the diff, either makes a one-shot fix itself or rewrites the task expectations.
+
+### What stays in main session context
+
+Only the following accumulate in the controller's context:
+
+- This plan file and the spec file (already loaded).
+- One-paragraph summary per completed task (report + SHA), not the full diff.
+- Open DONE_WITH_CONCERNS notes until resolved.
+- Current-batch dispatch tracking (which worktrees are in flight).
+
+Controller avoids reading implementation files directly — trusts the subagent reports + test status. Reads a file only when resolving a merge conflict or diagnosing a review loop stall.

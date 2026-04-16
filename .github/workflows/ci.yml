@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, master]
   pull_request:
-    branches: [main]
+    branches: [main, master]
 
 jobs:
   test:
@@ -27,3 +27,63 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm build
       - run: pnpm test
+
+  integration-hardhat:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm compile:contracts
+      - run: pnpm test:hardhat
+
+  integration-bcos:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm compile:contracts
+      - name: Deploy FISCO-BCOS node
+        run: |
+          curl -LO https://github.com/FISCO-BCOS/FISCO-BCOS/releases/download/v3.16.0/build_chain.sh
+          bash build_chain.sh -l 127.0.0.1:1 -p 30300,20200,8545
+          bash nodes/127.0.0.1/start_all.sh
+      - name: Wait for node ready
+        run: |
+          for i in $(seq 1 30); do
+            if curl -s -X POST http://127.0.0.1:20200 \
+              -H 'content-type: application/json' \
+              -d '{"jsonrpc":"2.0","id":1,"method":"getBlockNumber","params":["group0"]}' \
+              | grep -q result; then
+              echo "Node ready"; exit 0
+            fi
+            sleep 1
+          done
+          echo "Node failed to start"; exit 1
+      - run: pnpm test:bcos
+      - name: Stop node
+        if: always()
+        run: bash nodes/127.0.0.1/stop_all.sh 2>/dev/null || true

@@ -54,7 +54,7 @@ export async function seedContracts(opts: SeedOpts): Promise<SeedResult> {
   const walletClient = createWalletClient({ account: account1, chain, transport });
   const publicClient = createPublicClient({ chain, transport });
 
-  const startBlock = Number(await publicClient.getBlockNumber());
+  const startBlock = Number(await publicClient.getBlockNumber({ cacheTime: 0 }));
 
   // --- ERC20 ---
   const erc20 = await deployContract(walletClient, publicClient, ERC20_ARTIFACT, ["TestToken", "TT", 18]);
@@ -120,7 +120,7 @@ export async function seedContracts(opts: SeedOpts): Promise<SeedResult> {
   });
   await publicClient.waitForTransactionReceipt({ hash: handleOpsHash });
 
-  const endBlock = Number(await publicClient.getBlockNumber());
+  const endBlock = Number(await publicClient.getBlockNumber({ cacheTime: 0 }));
 
   return {
     erc20: { address: erc20.address, transferTxHash: erc20TransferHash, abi: ERC20_ARTIFACT.abi },

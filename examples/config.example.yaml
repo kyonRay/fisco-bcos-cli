@@ -1,0 +1,23 @@
+defaultChain: local
+
+defaults:
+  requestTimeoutMs: 10000
+  maxLogScanLines: 200000
+
+chains:
+  local:
+    bcosRpcUrl: http://127.0.0.1:20200
+    web3RpcUrl: http://127.0.0.1:8545
+    groupId: group0
+    chainId: 1
+    logDir: /data/fisco/node0/log
+
+  prod-g1:
+    bcosRpcUrl: https://rpc.example.com/bcos
+    web3RpcUrl: https://rpc.example.com/eth
+    groupId: group1
+    chainId: 20200
+    logDir: /var/log/fisco-bcos
+    requestTimeoutMs: 30000
+
+abiStoreDir: ~/.bcos-cli/abi

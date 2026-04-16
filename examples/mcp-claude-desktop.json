@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "fisco-bcos": {
+      "command": "npx",
+      "args": ["-y", "fisco-bcos-cli", "mcp"],
+      "env": {
+        "BCOS_CLI_CONFIG": "/Users/you/.bcos-cli/config.yaml"
+      }
+    }
+  }
+}

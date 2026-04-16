@@ -128,36 +128,74 @@ async function main(): Promise<void> {
     builder = builder.option(name, spec as never);
   }
 
-  for (const cmd of allCommands()) {
+  function buildOptions(yb: ReturnType<typeof yargs>, cmd: CommandDef) {
     const argInfos = collectArgs(cmd.schema);
-    const positional = argInfos
+    let y = yb;
+    for (const info of argInfos) {
+      if (info.kind === "boolean") {
+        y = y.option(info.name, { type: "boolean", default: info.default as boolean | undefined,
+          describe: info.description });
+      } else if (info.kind === "number") {
+        y = y.option(info.name, { type: "number", default: info.default as number | undefined });
+      } else if (info.kind === "array") {
+        // positional array; no option registration
+      } else {
+        if (info.optional || info.default !== undefined) {
+          y = y.option(info.name, { type: "string", default: info.default as string | undefined });
+        }
+      }
+    }
+    return y;
+  }
+
+  function positionalSuffix(cmd: CommandDef): string {
+    return collectArgs(cmd.schema)
       .filter((a) => a.kind === "string" || a.kind === "array")
       .filter((a) => !a.optional && a.default === undefined)
-      .map((a) => a.kind === "array" ? `<${a.name}...>` : `<${a.name}>`)
+      .map((a) => a.kind === "array" ? `[${a.name}...]` : `[${a.name}]`)
       .join(" ");
-    const usage = positional ? `${cmd.name} ${positional}` : cmd.name;
+  }
+
+  const grouped = new Map<string, CommandDef[]>();
+  const toplevel: CommandDef[] = [];
+  for (const cmd of allCommands()) {
+    const parts = cmd.name.split(" ");
+    if (parts.length === 1) {
+      toplevel.push(cmd);
+    } else {
+      const group = parts[0]!;
+      if (!grouped.has(group)) grouped.set(group, []);
+      grouped.get(group)!.push(cmd);
+    }
+  }
+
+  for (const cmd of toplevel) {
+    const pos = positionalSuffix(cmd);
+    const usage = pos ? `${cmd.name} ${pos}` : cmd.name;
     builder = builder.command(
       usage, cmd.description,
+      (yb) => buildOptions(yb, cmd),
+      async (parsed) => { await runCommand(cmd, parsed as Record<string, unknown>); },
+    );
+  }
+
+  for (const [group, cmds] of grouped) {
+    builder = builder.command(
+      group, `${group} commands`,
       (yb) => {
         let y = yb;
-        for (const info of argInfos) {
-          if (info.kind === "boolean") {
-            y = y.option(info.name, { type: "boolean", default: info.default as boolean | undefined,
-              describe: info.description });
-          } else if (info.kind === "number") {
-            y = y.option(info.name, { type: "number", default: info.default as number | undefined });
-          } else if (info.kind === "array") {
-            // positional array; no option registration needed
-          } else {
-            // keep as positional or optional string
-            if (info.optional || info.default !== undefined) {
-              y = y.option(info.name, { type: "string", default: info.default as string | undefined });
-            }
-          }
+        for (const cmd of cmds) {
+          const sub = cmd.name.slice(group.length + 1);
+          const pos = positionalSuffix(cmd);
+          const usage = pos ? `${sub} ${pos}` : sub;
+          y = y.command(
+            usage, cmd.description,
+            (syb) => buildOptions(syb, cmd),
+            async (parsed) => { await runCommand(cmd, parsed as Record<string, unknown>); },
+          );
         }
-        return y;
+        return y.demandCommand(1);
       },
-      async (parsed) => { await runCommand(cmd, parsed as Record<string, unknown>); },
     );
   }
 

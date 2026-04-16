@@ -1,4 +1,4 @@
-# Integration Test with Real FISCO-BCOS Node — Design Spec
+# Integration Test with Real Nodes — Design Spec
 
 **Date:** 2026-04-16
 **Status:** Approved
@@ -7,7 +7,12 @@
 
 ## 1. Goal
 
-Add real-node integration tests for fisco-bcos-cli that run against a locally deployed FISCO-BCOS v3.16.4 single-node chain. Tests cover both the service layer (bcosRpc, web3Rpc) and the command layer (handlers), using deployed ERC20/ERC721/ERC1155/ERC4337 contracts to exercise ABI decoding, event parsing, and call decoding with real data.
+Add real-node integration tests for fisco-bcos-cli using **two node backends**:
+
+1. **Hardhat node** — standard Ethereum JSON-RPC, validates that `web3Rpc` layer + `eth` subtree commands work against any EVM-compatible node (not just FISCO-BCOS's compatibility layer). Fast startup (~1s), well-documented, no binary download.
+2. **FISCO-BCOS v3.16.4 node** — native BCOS RPC, validates `bcosRpc` layer + all BCOS-specific commands (chain info, peers, doctor, etc.) and the full contract decode pipeline against the real chain.
+
+Both deploy ERC20/ERC721/ERC1155/ERC4337 contracts and exercise ABI decoding, event parsing, and call decoding with real data.
 
 Tests run locally (with `skipIf` when no node available) and in CI (GitHub Actions, ubuntu-latest + macos-latest).
 
@@ -15,7 +20,25 @@ Tests run locally (with `skipIf` when no node available) and in CI (GitHub Actio
 
 ## 2. Test Infrastructure
 
-### 2.1 Node Lifecycle Manager
+### 2.0 Hardhat Node Manager
+
+**File:** `test/helpers/hardhatNode.ts`
+
+Exports:
+- `setupHardhat(): Promise<HardhatInfo>` — start `npx hardhat node` as child process, wait for ready
+- `teardownHardhat(): Promise<void>` — kill process
+- `HardhatInfo: { url: string, chainId: number, accounts: string[] }`
+
+Behavior:
+1. Spawn `npx hardhat node --port 8546` (use 8546 to avoid conflict with FISCO-BCOS on 8545)
+2. Poll `http://127.0.0.1:8546` with `eth_blockNumber` until response, timeout 15s
+3. Return `{ url: "http://127.0.0.1:8546", chainId: 31337, accounts: [...20 funded accounts] }`
+
+Teardown: `SIGTERM` the child process.
+
+**Dev dependency:** `hardhat` added to `devDependencies`. Minimal `hardhat.config.ts` at project root (empty config, only needed for `npx hardhat node`).
+
+### 2.1 FISCO-BCOS Node Lifecycle Manager
 
 **File:** `test/helpers/chainNode.ts`
 
@@ -35,11 +58,11 @@ Teardown:
 1. `bash nodes/127.0.0.1/stop_all.sh`
 2. `rm -rf` the temp directory
 
-### 2.2 Contract Seed
+### 2.2 Contract Seed (shared by both backends)
 
 **File:** `test/helpers/seedContracts.ts`
 
-After node is ready, deploy contracts and execute transactions. Uses viem's `createWalletClient` + `createPublicClient` connected to `http://127.0.0.1:8545`.
+After either node is ready, deploy contracts and execute transactions. Uses viem's `createWalletClient` + `createPublicClient` connected to the node's web3 RPC URL. The same seed function works for both Hardhat (port 8546) and FISCO-BCOS (port 8545).
 
 **Contracts (minimal inline ABI + bytecode, no Solidity compilation at test time):**
 
@@ -75,38 +98,82 @@ interface SeedResult {
 
 ### 2.3 Vitest Global Setup
 
-**File:** `test/integration/globalSetup.real.ts`
+Two separate global setups, one per backend:
 
+**File:** `test/integration/globalSetup.hardhat.ts`
+```
+export async function setup() {
+  const hardhat = await setupHardhat();
+  const seed = await seedContracts({ web3RpcUrl: hardhat.url });
+  // Write seed result to temp JSON + set HARDHAT_TEST_URL, HARDHAT_TEST_SEED_FILE
+}
+export async function teardown() {
+  await teardownHardhat();
+}
+```
+
+**File:** `test/integration/globalSetup.bcos.ts`
 ```
 export async function setup() {
   const chain = await setupChain();
-  const seed = await seedContracts(chain);
-  // Write to a temp JSON file for test processes to read
-  // Set env vars: BCOS_TEST_RPC_URL, BCOS_TEST_WEB3_URL, BCOS_TEST_SEED_FILE
+  const seed = await seedContracts({ web3RpcUrl: chain.web3RpcUrl });
+  // Write seed result to temp JSON + set BCOS_TEST_RPC_URL, BCOS_TEST_WEB3_URL, BCOS_TEST_SEED_FILE
 }
 export async function teardown() {
   await teardownChain();
 }
 ```
 
-A separate vitest config `vitest.real.config.ts` uses this globalSetup, running only `**/*.real.test.ts` files.
+Two vitest configs:
+- `vitest.hardhat.config.ts` — globalSetup hardhat, includes `**/*.hardhat.test.ts`
+- `vitest.bcos.config.ts` — globalSetup bcos, includes `**/*.bcos.test.ts`
 
 ### 2.4 Skip Guard
 
-All `*.real.test.ts` files start with:
-```ts
-import { describe } from "vitest";
-const skip = !process.env.BCOS_TEST_RPC_URL;
-describe.skipIf(skip)("...", () => { ... });
-```
+Hardhat tests: `describe.skipIf(!process.env.HARDHAT_TEST_URL)`
+BCOS tests: `describe.skipIf(!process.env.BCOS_TEST_RPC_URL)`
 
-This means `pnpm test` (the default config) skips them. Only `pnpm test:real` (using vitest.real.config.ts) runs them.
+`pnpm test` (default) skips both. Separate scripts:
+- `pnpm test:hardhat` — Hardhat-only integration tests
+- `pnpm test:bcos` — FISCO-BCOS-only integration tests
+- `pnpm test:real` — runs both sequentially
 
 ---
 
 ## 3. Test Cases
 
-### 3.1 Service Layer — bcosRpc (8 tests)
+### 3.0 Hardhat — web3Rpc + eth commands (15 tests)
+
+These run against Hardhat node (standard Ethereum). Validates that the web3Rpc layer and eth subtree commands work with any EVM node, not just FISCO-BCOS.
+
+**File:** `test/integration/services/web3Rpc.hardhat.test.ts` (7 tests)
+
+| # | Test | Assert |
+|---|---|---|
+| 1 | blockNumber() | bigint ≥ 0n |
+| 2 | chainId() | 31337 (Hardhat default) |
+| 3 | gasPrice() | bigint > 0n |
+| 4 | getBlock(seed block number) | contains transactions |
+| 5 | getTransaction(ERC20 tx hash) | to = ERC20 contract address |
+| 6 | getTransactionReceipt(ERC20 tx hash) | contains logs (Transfer event) |
+| 7 | getLogs(seed block range, ERC20 address) | contains Transfer event logs |
+
+**File:** `test/integration/commands/eth.hardhat.test.ts` (8 tests)
+
+Uses real `web3Rpc` client against Hardhat, with fake `bcosRpc` (eth commands don't use it).
+
+| # | Command | Contract | Assert |
+|---|---|---|---|
+| 1 | eth block-number | — | returns blockNumber string |
+| 2 | eth chain-id | — | returns 31337 |
+| 3 | eth gas-price | — | returns non-zero string |
+| 4 | eth block (seed block) | — | contains transactions |
+| 5 | eth tx (ERC20 hash) | ERC20 | tx.to = contract address |
+| 6 | eth receipt (ERC20 hash) | ERC20 | logs non-empty |
+| 7 | eth call (balanceOf) | ERC20 | returns encoded balance |
+| 8 | eth logs (seed range) | ERC20 | Transfer events |
+
+### 3.1 FISCO-BCOS — bcosRpc (8 tests)
 
 File: `test/integration/services/bcosRpc.real.test.ts`
 
@@ -162,16 +229,38 @@ Uses real `buildContext` with the test node's URLs.
 | 17 | doctor chain | — | findings array exists |
 | 18 | abi add + tx --decode | ERC20 | register ABI then tx decode → degraded=false |
 
-**Total: 33 tests** (8 + 7 + 18)
+**FISCO-BCOS subtotal: 33 tests** (8 + 7 + 18)
+
+**Grand total: 48 tests** (Hardhat 15 + FISCO-BCOS 33)
 
 ---
 
 ## 4. CI Workflow
 
-### 4.1 New job in `.github/workflows/ci.yml`
+### 4.1 Two new jobs in `.github/workflows/ci.yml`
 
+**Hardhat integration job** (fast, ~30s):
 ```yaml
-integration:
+integration-hardhat:
+  runs-on: ${{ matrix.os }}
+  strategy:
+    fail-fast: false
+    matrix:
+      os: [ubuntu-latest, macos-latest]
+  steps:
+    - uses: actions/checkout@v4
+    - uses: pnpm/action-setup@v4
+      with: { version: 9 }
+    - uses: actions/setup-node@v4
+      with: { node-version: 22, cache: pnpm }
+    - run: pnpm install --frozen-lockfile
+    - run: pnpm build
+    - run: pnpm test:hardhat
+```
+
+**FISCO-BCOS integration job** (slower, ~60s):
+```yaml
+integration-bcos:
   runs-on: ${{ matrix.os }}
   strategy:
     fail-fast: false
@@ -202,25 +291,34 @@ integration:
           sleep 1
         done
         echo "Node failed to start"; exit 1
-    - run: pnpm test:real
+    - run: pnpm test:bcos
     - name: Stop node
       if: always()
       run: bash nodes/127.0.0.1/stop_all.sh 2>/dev/null || true
 ```
 
+Both jobs run in parallel with the existing `test` job.
+
 ### 4.2 package.json scripts
 
 Add:
 ```json
-"test:real": "vitest run --config vitest.real.config.ts"
+"test:hardhat": "vitest run --config vitest.hardhat.config.ts",
+"test:bcos": "vitest run --config vitest.bcos.config.ts",
+"test:real": "pnpm test:hardhat && pnpm test:bcos"
 ```
 
-### 4.3 vitest.real.config.ts
+### 4.3 Vitest configs
 
-Separate config that:
-- Uses `globalSetup: "./test/integration/globalSetup.real.ts"`
-- Includes only `**/*.real.test.ts`
-- Sets higher timeout (30s per test for RPC calls)
+**`vitest.hardhat.config.ts`:**
+- `globalSetup: "./test/integration/globalSetup.hardhat.ts"`
+- Includes only `**/*.hardhat.test.ts`
+- Timeout: 15s per test
+
+**`vitest.bcos.config.ts`:**
+- `globalSetup: "./test/integration/globalSetup.bcos.ts"`
+- Includes only `**/*.bcos.test.ts`
+- Timeout: 30s per test (BCOS RPC is slower)
 
 ---
 
@@ -228,18 +326,29 @@ Separate config that:
 
 | File | Purpose |
 |---|---|
-| `test/helpers/chainNode.ts` | Node lifecycle (setup/teardown) |
-| `test/helpers/seedContracts.ts` | Deploy contracts + execute seed transactions |
+| **Infrastructure** | |
+| `test/helpers/hardhatNode.ts` | Hardhat node lifecycle (start/stop child process) |
+| `test/helpers/chainNode.ts` | FISCO-BCOS node lifecycle (build_chain.sh deploy/start/stop) |
+| `test/helpers/seedContracts.ts` | Deploy ERC20/721/1155/4337 + seed txs (shared by both backends) |
 | `test/helpers/contracts/erc20.ts` | ERC20 ABI + bytecode constant |
 | `test/helpers/contracts/erc721.ts` | ERC721 ABI + bytecode constant |
 | `test/helpers/contracts/erc1155.ts` | ERC1155 ABI + bytecode constant |
 | `test/helpers/contracts/erc4337.ts` | EntryPoint + SimpleAccount ABI + bytecode |
-| `test/integration/globalSetup.real.ts` | Vitest global setup/teardown |
-| `test/integration/services/bcosRpc.real.test.ts` | 8 service-layer tests |
-| `test/integration/services/web3Rpc.real.test.ts` | 7 service-layer tests |
-| `test/integration/commands/real.test.ts` | 18 command-layer tests |
-| `vitest.real.config.ts` | Vitest config for real-node tests |
-| `.github/workflows/ci.yml` | Updated with integration job |
+| **Global setup** | |
+| `test/integration/globalSetup.hardhat.ts` | Hardhat global setup/teardown |
+| `test/integration/globalSetup.bcos.ts` | FISCO-BCOS global setup/teardown |
+| **Hardhat tests** | |
+| `test/integration/services/web3Rpc.hardhat.test.ts` | 7 web3Rpc service tests against Hardhat |
+| `test/integration/commands/eth.hardhat.test.ts` | 8 eth subtree command tests against Hardhat |
+| **FISCO-BCOS tests** | |
+| `test/integration/services/bcosRpc.bcos.test.ts` | 8 bcosRpc service tests against FISCO-BCOS |
+| `test/integration/services/web3Rpc.bcos.test.ts` | 7 web3Rpc service tests against FISCO-BCOS |
+| `test/integration/commands/real.bcos.test.ts` | 18 command-layer tests against FISCO-BCOS |
+| **Config** | |
+| `vitest.hardhat.config.ts` | Vitest config for Hardhat tests |
+| `vitest.bcos.config.ts` | Vitest config for FISCO-BCOS tests |
+| `hardhat.config.ts` | Minimal Hardhat config (needed for `npx hardhat node`) |
+| `.github/workflows/ci.yml` | Updated with two integration jobs |
 
 ---
 
@@ -256,6 +365,8 @@ ERC4337's EntryPoint contract is complex. If FISCO-BCOS v3.16.4 does not support
 
 - No Solidity compilation at test time — all bytecode is pre-compiled and inlined
 - Node startup/teardown once per test suite (globalSetup), not per test
-- Tests are idempotent: each run deploys fresh contracts (node state from prior runs doesn't matter since build_chain.sh creates a fresh chain)
-- `pnpm test` (default) skips all real-node tests — they only run via `pnpm test:real`
-- CI integration job is independent from the existing unit test job
+- Tests are idempotent: each run deploys fresh contracts (Hardhat resets on restart; build_chain.sh creates a fresh chain)
+- `pnpm test` (default) skips all real-node tests — they only run via `pnpm test:hardhat`, `pnpm test:bcos`, or `pnpm test:real`
+- CI has three independent jobs: unit tests, Hardhat integration, FISCO-BCOS integration
+- Hardhat and FISCO-BCOS use different ports (8546 vs 8545) so they could theoretically run in parallel, but CI jobs are separate for clarity
+- `seedContracts` is backend-agnostic — takes a web3 RPC URL and works with any EVM node

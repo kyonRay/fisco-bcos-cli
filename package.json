@@ -24,7 +24,8 @@
     "test:watch": "vitest",
     "lint": "eslint src test --ext .ts",
     "prepublishOnly": "pnpm build",
-    "compile:contracts": "hardhat compile"
+    "compile:contracts": "hardhat compile",
+    "test:hardhat": "vitest run --config vitest.hardhat.config.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
